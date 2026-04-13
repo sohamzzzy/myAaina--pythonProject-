@@ -1,0 +1,555 @@
+// Global State
+let charts = {};
+window.userObj = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  // Init Profile if passed down
+  if (typeof userProfileInfo !== 'undefined' && userProfileInfo) {
+    window.userObj = userProfileInfo;
+    populateProfileForm(userProfileInfo);
+    document.getElementById('nav-profile-area').textContent = `Hi, ${userProfileInfo.name.split(' ')[0]}`;
+  }
+  
+  // Attach Slider listener
+  document.getElementById('deals-budget-slider').addEventListener('mouseup', () => {
+    fetchDeals();
+  });
+  document.getElementById('deals-budget-slider').addEventListener('touchend', () => {
+    fetchDeals();
+  });
+
+  // Style Interest checkbox toggle
+  document.querySelectorAll('.check-item').forEach(label => {
+    label.addEventListener('click', () => {
+      setTimeout(() => {
+        const cb = label.querySelector('input[type="checkbox"]');
+        if (cb && cb.checked) {
+          label.classList.add('selected');
+        } else {
+          label.classList.remove('selected');
+        }
+      }, 10);
+    });
+    // Init state on load
+    const cb = label.querySelector('input[type="checkbox"]');
+    if (cb && cb.checked) label.classList.add('selected');
+  });
+
+  // Init Explore — show ALL products on first load
+  fetchAllExplore();
+  fetchTrending();
+  fetchDeals();
+});
+
+// ── NAVIGATION & TABBING ──
+function showSection(sectionId) {
+  document.querySelectorAll('.section').forEach(sec => {
+    sec.classList.remove('active');
+    sec.style.animation = 'none';
+  });
+  
+  const activeSec = document.getElementById(sectionId);
+  activeSec.classList.add('active');
+  // Trigger reflow
+  void activeSec.offsetWidth;
+  activeSec.style.animation = 'fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards';
+
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById(`nav-${sectionId}`);
+  if(btn) btn.classList.add('active');
+
+  // Lazy loading hooks
+  if(sectionId === 'history') loadHistory();
+  if(sectionId === 'wishlist') loadWishlist();
+}
+
+function switchTab(tabId) {
+  document.querySelectorAll('.explore-tabs .tab-btn').forEach(btn => btn.classList.remove('active'));
+  document.getElementById(`tab-${tabId}`).classList.add('active');
+
+  // Hide all panels, then show the target one
+  document.querySelectorAll('.explore-panel').forEach(p => {
+    p.classList.remove('active-panel');
+    p.classList.add('hidden');
+  });
+  const target = document.getElementById(`explore-${tabId}-panel`);
+  target.classList.remove('hidden');
+  target.classList.add('active-panel');
+}
+
+// ── PROFILE ──
+function populateProfileForm(profile) {
+  const fields = ['name','age','gender','body_type','skin_tone','size','budget_min','budget_max'];
+  fields.forEach(f => {
+    if(document.getElementById(f) && profile[f]) {
+      document.getElementById(f).value = profile[f];
+    }
+  });
+  
+  if (profile.interests) {
+    document.querySelectorAll('.check-item input[type="checkbox"]').forEach(cb => {
+      cb.checked = profile.interests.includes(cb.value);
+    });
+  }
+}
+
+async function saveProfile(event) {
+  event.preventDefault();
+  const btn = document.getElementById('save-profile-btn');
+  const orgTxt = btn.innerHTML;
+  btn.innerHTML = 'Saving...';
+  btn.disabled = true;
+
+  const interests = Array.from(document.querySelectorAll('.check-item input:checked')).map(c => c.value);
+  const data = {
+    name: document.getElementById('name').value,
+    age: document.getElementById('age').value,
+    gender: document.getElementById('gender').value,
+    body_type: document.getElementById('body_type').value,
+    skin_tone: document.getElementById('skin_tone').value,
+    size: document.getElementById('size').value,
+    budget_min: document.getElementById('budget_min').value,
+    budget_max: document.getElementById('budget_max').value,
+    interests
+  };
+
+  try {
+    const res = await fetch('/api/save-profile', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data)
+    });
+    const d = await res.json();
+    const status = document.getElementById('profile-status');
+    status.classList.remove('hidden', 'error', 'success');
+    
+    if (d.success) {
+      status.classList.add('success');
+      status.innerHTML = `${d.message}`;
+      window.userObj = data;
+      document.getElementById('nav-profile-area').textContent = `Hi, ${data.name.split(' ')[0]}`;
+      showToast('Profile Saved!', 'success');
+      setTimeout(() => showSection('recommend'), 1200);
+    } else {
+      status.classList.add('error');
+      status.innerHTML = `${d.message}`;
+    }
+  } catch(e) {
+    console.error(e);
+  } finally {
+    btn.innerHTML = orgTxt;
+    btn.disabled = false;
+  }
+}
+
+// ── LOADING SPINNER ──
+const LOADER_HTML = `<div style="text-align:center; padding:3rem;"><div style="display:inline-block; width:36px; height:36px; border:3px solid var(--line); border-top-color:var(--accent); border-radius:50%; animation: spin 0.8s linear infinite;"></div><p style="margin-top:1rem; color:var(--ink-soft); font-weight:600;">Finding the best picks for you...</p></div>`;
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+// ── EXPLORE (SEARCH, TRENDING, DEALS) ──
+async function doSearch() {
+  const q = document.getElementById('search-input').value.trim();
+  if(!q) return;
+  switchTab('search');
+  document.getElementById('search-no-results').classList.add('hidden');
+  document.getElementById('search-results-grid').innerHTML = LOADER_HTML;
+
+  try {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const d = await res.json();
+    await delay(2000);
+    if (d.success && d.results.length > 0) {
+      document.getElementById('search-results-grid').innerHTML = generateCardGrid(d.results, false);
+    } else {
+      document.getElementById('search-results-grid').innerHTML = '';
+      document.getElementById('search-no-results').classList.remove('hidden');
+    }
+  } catch(e) { console.error(e); }
+}
+
+// Fetch ALL products for explore default view
+async function fetchAllExplore() {
+  try {
+    document.getElementById('search-results-grid').innerHTML = LOADER_HTML;
+    const res = await fetch('/api/trending?all=true');
+    const d = await res.json();
+    await delay(2000);
+    if(d.success && d.results.length > 0) {
+      document.getElementById('search-results-grid').innerHTML = generateCardGrid(d.results, false);
+      document.getElementById('search-no-results').classList.add('hidden');
+    }
+  } catch(e) {}
+}
+
+async function fetchTrending() {
+  try {
+    document.getElementById('trending-grid').innerHTML = LOADER_HTML;
+    const res = await fetch('/api/trending');
+    const d = await res.json();
+    await delay(2000);
+    if(d.success) document.getElementById('trending-grid').innerHTML = generateCardGrid(d.results, false);
+  } catch(e) {}
+}
+
+function updateDealsBudget(val) {
+  document.getElementById('deals-budget-label').textContent = `₹${val}`;
+}
+
+async function fetchDeals() {
+  const b = document.getElementById('deals-budget-slider').value;
+  try {
+    document.getElementById('deals-grid').innerHTML = LOADER_HTML;
+    const res = await fetch(`/api/deals?budget=${b}`);
+    const d = await res.json();
+    await delay(2000);
+    if(d.success) document.getElementById('deals-grid').innerHTML = generateCardGrid(d.results, false);
+  } catch(e) {}
+}
+
+// ── RECOMMEND ──
+async function getRecommendations() {
+  const occasion = document.getElementById('occasion').value;
+  const sortBy = document.getElementById('sort_by').value;
+
+  if(!occasion) {
+    showToast('Please select an occasion.', 'error');
+    return;
+  }
+  
+  if(!window.userObj) {
+    showToast('Please complete your profile first!', 'error');
+    showSection('home');
+    return;
+  }
+
+  const btn = document.getElementById('find-btn');
+  const orgTxt = btn.innerHTML;
+  btn.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border:2px solid #fff4;border-top-color:#fff;border-radius:50%;animation:spin 0.8s linear infinite;vertical-align:middle;margin-right:8px;"></span>AI is styling...';
+  btn.disabled = true;
+
+  try {
+    const res = await fetch('/api/recommend', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ occasion, sort_by: sortBy })
+    });
+    const d = await res.json();
+    await delay(2000);
+    
+    const sec = document.getElementById('results-section');
+    const none = document.getElementById('no-results');
+    const chrt = document.getElementById('charts-section');
+
+    if(d.success) {
+      if(d.results.length === 0) {
+        sec.classList.add('hidden'); chrt.classList.add('hidden'); none.classList.remove('hidden');
+      } else {
+        none.classList.add('hidden'); sec.classList.remove('hidden'); chrt.classList.remove('hidden');
+        document.getElementById('results-title').textContent = `${d.results.length} Matches for ${d.user}'s ${occasion}`;
+        document.getElementById('results-grid').innerHTML = generateCardGrid(d.results, true);
+        renderDecisionCharts(d.price_chart, d.quality_chart, d.delivery_chart);
+        // Scroll to results seamlessly
+        setTimeout(()=> chrt.scrollIntoView({behavior:'smooth'}), 100);
+      }
+    } else {
+      showToast(d.message, 'error');
+    }
+  } catch(e) { console.error(e); } finally {
+    btn.innerHTML = orgTxt;
+    btn.disabled = false;
+  }
+}
+
+function renderDecisionCharts(pData, qData, dData) {
+  if(charts.pc) charts.pc.destroy();
+  if(charts.qc) charts.qc.destroy();
+  if(charts.dc) charts.dc.destroy();
+
+  const getCtx = id => document.getElementById(id).getContext('2d');
+  const sharedOpt = { responsive: true, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: '#6e6d7a' } }, x: { ticks: { color: '#6e6d7a' } } } };
+
+  charts.pc = new Chart(getCtx('priceChart'), {
+    type: 'bar',
+    data: { labels: Object.keys(pData), datasets: [{ data: Object.values(pData), backgroundColor: 'rgba(0, 123, 255, 0.6)', borderColor: '#007bff', borderWidth: 1, borderRadius: 8 }] },
+    options: sharedOpt
+  });
+
+  charts.qc = new Chart(getCtx('qualityChart'), {
+    type: 'line',
+    data: { labels: Object.keys(qData), datasets: [{ data: Object.values(qData), borderColor: '#ff4785', backgroundColor: 'rgba(255, 71, 133, 0.2)', borderWidth: 3, pointBackgroundColor: '#fff', fill: true, tension: 0.4 }] },
+    options: { ...sharedOpt, scales: { ...sharedOpt.scales, y: { ...sharedOpt.scales.y, min: 2, max: 5 } } }
+  });
+
+  charts.dc = new Chart(getCtx('deliveryChart'), {
+    type: 'bar',
+    data: { labels: Object.keys(dData), datasets: [{ data: Object.values(dData), backgroundColor: 'rgba(0, 184, 148, 0.6)', borderColor: '#00b894', borderWidth: 1, borderRadius: 8 }] },
+    options: sharedOpt
+  });
+}
+
+// ── UTILS & HTML GEN ──
+function getImgSrc(item) {
+  if (item.image_url && item.image_url.startsWith('http')) {
+    return `/api/image-proxy?url=${encodeURIComponent(item.image_url)}`;
+  }
+  return 'https://placehold.co/500x700/f5ede1/8a6332?text=Image+Not+Found';
+}
+
+function renderStars(rating) {
+  const f = Math.floor(rating), h = rating % 1 >= 0.5 ? 1 : 0, e = 5 - f - h;
+  return '★'.repeat(f) + (h ? '½' : '') + '☆'.repeat(e);
+}
+
+function generateCardGrid(items, showScore = false) {
+  // Store items in global for modal reference
+  window.catalogData = window.catalogData || {};
+  items.forEach(i => window.catalogData[i.id] = i);
+
+  return items.map((item, idx) => `
+    <div class="product-card" style="animation: fadeInUp 0.4s ease forwards; animation-delay: ${Math.min(idx * 0.04, 1.2)}s; opacity:0;">
+      
+      <button class="wishlist-btn ${item.in_wishlist?'active':''}" onclick="event.stopPropagation(); toggleWishlist('${item.id}', this)">
+        ${item.in_wishlist?'♥':'♡'}
+      </button>
+
+      <div class="img-container" onclick="openModal('${item.id}')">
+        <img src="${getImgSrc(item)}" class="product-img" loading="lazy" alt="${item.name}" onerror="this.onerror=null; this.src='https://placehold.co/500x700/f5ede1/8a6332?text=Image+Not+Found'"/>
+        <span class="platform-badge">${item.platform}</span>
+      </div>
+
+      <div class="product-name" title="${item.name}">${item.name}</div>
+      <div class="product-cat">${item.category}</div>
+      ${item.match_reason ? `<div style="font-size: 0.8rem; font-weight: 600; color: var(--accent); margin-top: -5px; margin-bottom: 5px;">${item.match_reason}</div>` : ''}
+
+      <div class="product-meta">
+        <div class="meta-row">
+          <span class="meta-label">Price</span>
+          <span class="meta-value price-value">₹${(parseFloat(item.price) || 0).toLocaleString('en-IN')}</span>
+        </div>
+        <div class="meta-row">
+          <span class="meta-label">Rating</span>
+          <span class="meta-value" style="color:#ffb86c;">${(parseFloat(item.quality_rating) || 0).toFixed(1)} ★</span>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:0.5rem;">
+        <button class="btn-buy" style="flex:1;" id="buy-btn-${item.id}" onclick="logPurchase('${item.id}')">
+          Add to Wardrobe
+        </button>
+        <a href="${item.product_url}" target="_blank" rel="noopener" class="btn-buy" style="flex:0.6; text-align:center; text-decoration:none; background: linear-gradient(135deg, #3e465e, #5b6a8a);">
+          View ↗
+        </a>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ── ACTIONS ──
+async function toggleWishlist(id, btnElement) {
+  try {
+    const res = await fetch('/api/wishlist/toggle', {
+      method: 'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({item_id: id})
+    });
+    const d = await res.json();
+    if(d.success) {
+      showToast(d.message, d.added ? 'success' : '');
+      if(d.added) {
+        btnElement.classList.add('active');
+        btnElement.innerHTML = '♥';
+      } else {
+        btnElement.classList.remove('active');
+        btnElement.innerHTML = '♡';
+        if(document.getElementById('wishlist').classList.contains('active')) loadWishlist();
+      }
+    }
+  } catch(e) {}
+}
+
+async function logPurchase(id) {
+  try {
+    const item = window.catalogData[id];
+    if (!item) { showToast('Item data not found', 'error'); return; }
+    const res = await fetch('/api/log-purchase', {
+      method: 'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({item_id: id, item: item})
+    });
+    const d = await res.json();
+    if(d.success) {
+      showToast('Added to your Wardrobe!', 'success');
+      const b = document.getElementById(`buy-btn-${id}`);
+      if(b) {
+        b.innerHTML = '\u2713 In Wardrobe';
+        b.classList.add('logged');
+        b.disabled = true;
+      }
+    } else {
+      showToast(d.message || 'Failed to add', 'error');
+    }
+  } catch(e){ showToast('Error adding to wardrobe', 'error'); }
+}
+
+// ── WISHLIST VIEW ──
+async function loadWishlist() {
+  document.getElementById('wishlist-grid').innerHTML = '';
+  try {
+    const res = await fetch('/api/wishlist');
+    const d = await res.json();
+    if(d.success) {
+      if(d.items.length===0){
+        document.getElementById('no-wishlist').classList.remove('hidden');
+        document.getElementById('wishlist-grid').classList.add('hidden');
+      } else {
+        document.getElementById('no-wishlist').classList.add('hidden');
+        document.getElementById('wishlist-grid').classList.remove('hidden');
+        document.getElementById('wishlist-grid').innerHTML = generateCardGrid(d.items);
+      }
+    }
+  } catch(e){}
+}
+
+// ── HISTORY VIEW ──
+async function loadHistory() {
+  try {
+    const res = await fetch('/api/history');
+    const d = await res.json();
+
+    const none = document.getElementById('no-history');
+    const grid = document.getElementById('history-grid');
+    const chartsRow = document.getElementById('history-charts-row');
+    const kpiRow = document.getElementById('kpi-row');
+
+    if(!d.items || d.items.length === 0) {
+      none.classList.remove('hidden');
+      grid.innerHTML = '';
+      chartsRow.classList.add('hidden');
+      kpiRow.classList.add('hidden');
+      document.getElementById('wardrobe-label').classList.add('hidden');
+      return;
+    }
+
+    none.classList.add('hidden');
+    chartsRow.classList.remove('hidden');
+    kpiRow.classList.remove('hidden');
+    document.getElementById('wardrobe-label').classList.remove('hidden');
+    document.getElementById('wardrobe-label').innerHTML = `All Past Purchases (${d.total_items})`;
+
+    // Update KPIs
+    document.getElementById('kpi-total-items').innerText = d.total_items;
+    document.getElementById('kpi-total-spend').innerText = `₹${d.total_spend.toLocaleString('en-IN')}`;
+    
+    const avgQ = d.items.reduce((s,i)=> s+parseFloat(i.quality_rating), 0)/d.items.length;
+    document.getElementById('kpi-avg-quality').innerText = avgQ.toFixed(1);
+
+    const tops = Object.entries(d.platform_spend).sort((a,b)=>b[1]-a[1]);
+    document.getElementById('kpi-fav-platform').innerText = tops.length ? tops[0][0] : '—';
+
+    // Render Grid
+    grid.innerHTML = d.items.map((item, idx) => `
+      <div class="product-card" style="animation-delay:${idx*0.05}s">
+        <div class="img-container" onclick="openModal('${item.id}')">
+          <img src="${getImgSrc(item)}" class="product-img" loading="lazy" />
+          <span class="platform-badge" style="background:var(--accent); color:#000;">Purchased</span>
+        </div>
+        <div class="product-name">${item.name}</div>
+        <div class="meta-row mt-2" style="background: rgba(80,250,123,0.1); border: 1px solid rgba(80,250,123,0.2); padding: 10px; border-radius:8px;">
+          <span class="meta-label" style="color:var(--accent)">Paid</span>
+          <span class="meta-value price-value">₹${parseFloat(item.price).toLocaleString('en-IN')}</span>
+        </div>
+      </div>
+    `).join('');
+
+    renderHistoryCharts(d.stats, d.platform_spend);
+
+  } catch(e) { console.error(e); }
+}
+
+function renderHistoryCharts(stats, platformStats) {
+  if(charts.hc) charts.hc.destroy();
+  if(charts.psc) charts.psc.destroy();
+  
+  const ctxHC = document.getElementById('historyChart').getContext('2d');
+  const ctxPSC = document.getElementById('platformSpendChart').getContext('2d');
+  const colors = ['#ff4785', '#007bff', '#00b894', '#f1fa8c', '#ff5555', '#a29bfe', '#e17055'];
+
+  charts.hc = new Chart(ctxHC, {
+    type: 'doughnut',
+    data: { labels: Object.keys(stats), datasets: [{ data: Object.values(stats), backgroundColor: colors, borderWidth: 2, borderColor: '#fff' }] },
+    options: { responsive: true, plugins: { legend: { position: 'right', labels:{color:'#6e6d7a'} } }, cutout: '75%' }
+  });
+
+  charts.psc = new Chart(ctxPSC, {
+    type: 'pie',
+    data: { labels: Object.keys(platformStats), datasets: [{ data: Object.values(platformStats), backgroundColor: colors.slice().reverse(), borderWidth: 2, borderColor: '#fff' }] },
+    options: { responsive: true, plugins: { legend: { position: 'right', labels:{color:'#6e6d7a'} } } }
+  });
+}
+
+// ── MODAL ──
+function openModal(itemId) {
+  const item = window.catalogData[itemId];
+  if(!item) return;
+
+  const content = `
+    <div class="modal-body">
+      <div class="modal-img-col">
+        <img src="${getImgSrc(item)}" class="modal-img" />
+        <button class="wishlist-btn ${item.in_wishlist?'active':''}" style="width:50px;height:50px;font-size:1.5rem;" onclick="toggleWishlist('${item.id}', this); event.stopPropagation();">
+          ${item.in_wishlist?'♥':'♡'}
+        </button>
+      </div>
+      <div class="modal-info-col">
+        <div class="modal-platform">via ${item.platform}</div>
+        <h2 class="modal-title">${item.name}</h2>
+        <div class="modal-desc">${item.description || 'A beautiful traditional piece for your wardrobe.'}</div>
+        
+        <div class="modal-metrics">
+          <div class="metric">
+            <span class="metric-label">Price</span>
+            <span class="metric-val price">₹${(parseFloat(item.price) || 0).toLocaleString('en-IN')}</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Quality Score</span>
+            <span class="metric-val">${item.quality_rating} / 5.0</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Delivery Est.</span>
+            <span class="metric-val">${item.delivery_days} Days</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Size Availability</span>
+            <span class="metric-val">${item.size || 'S / M / L / XL'}</span>
+          </div>
+        </div>
+
+        <button class="btn-primary" style="margin-top:0;" onclick="logPurchase('${item.id}'); closeModal(event);">
+          Buy Now &amp; Log Purchase
+        </button>
+      </div>
+    </div>
+  `;
+  document.getElementById('modal-content').innerHTML = content;
+  document.getElementById('product-modal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden'; // stop background scroll
+}
+
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('product-modal') && !e.target.closest('.modal-close')) {
+    // Only close if clicking overlay or close btn
+    if(!e.target.classList.contains('modal-overlay')) return;
+  }
+  document.getElementById('product-modal').classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+// ── TOAST ──
+function showToast(msg, type='success') {
+  const toast = document.getElementById('toast');
+  toast.innerText = msg;
+  toast.className = 'toast ' + (type === 'error' ? 'toast-error' : '');
+  toast.classList.remove('hidden');
+  
+  setTimeout(() => toast.classList.add('hidden'), 3500);
+}
